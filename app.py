@@ -232,6 +232,16 @@ def format_shortlist(user_text: str, result: dict, link: str, locale: str|None) 
     lines.append(f"Смотреть все: {link}")
     return "\n".join(lines)
 
+@app.get("/chat")
+def chat_info():
+    return (
+        "<h3>Evengo API</h3>"
+        "<p>Use <code>POST /chat</code> with JSON: "
+        '<code>{"text": "ваш запрос"}</code>.</p>',
+        200,
+        {"Content-Type": "text/html; charset=utf-8"},
+    )
+
 @app.post("/chat")
 def chat():
     try:
