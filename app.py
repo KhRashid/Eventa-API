@@ -7,6 +7,10 @@ OFFTOPIC_REPLY = "вопрос не относится задачам серви
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = Flask(__name__)
 
+@app.get("/")
+def health():
+    return "ok", 200
+
 # ---------- Firestore (ADC в Cloud Run) ----------
 import firebase_admin
 from firebase_admin import firestore
