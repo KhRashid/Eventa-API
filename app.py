@@ -1,4 +1,4 @@
-# rev16
+# rev17
 import os, json
 from flask import Flask, request, jsonify
 from openai import OpenAI
