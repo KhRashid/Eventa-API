@@ -17,4 +17,5 @@ ENV PORT=8080
 
 # запуск через gunicorn, привязка ко всем интерфейсам и к $PORT
 # CMD ["python", "app.py"]
-CMD ["gunicorn", "-b", ":$PORT", "app:app"]
+# CMD ["gunicorn", "-b", ":$PORT", "app:app"]
+CMD ["sh", "-c", "gunicorn -b 0.0.0.0:${PORT:-8080} app:app"]
