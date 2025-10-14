@@ -1,7 +1,9 @@
-# rev17
+# rev18
 import os, json
 from flask import Flask, request, jsonify
 from openai import OpenAI
+from urllib.parse import urlencode
+from typing import Any, Iterable
 
 OFFTOPIC_REPLY = "вопрос не относится задачам сервиса и ответить на него не могу"
 
@@ -141,60 +143,118 @@ def extract_filters(user_text: str) -> dict:
         print("OpenAI error (extract_filters):", repr(e))
         return {"guest_count": 1}
 
-# ---------- Поиск в Firestore под твою схему документов ----------
-from urllib.parse import urlencode
+# ---------- helpers: unwrap Firestore REST doc + district normalization ----------
+def _unwrap_firestore_rest(doc: dict) -> dict:
+    """Принимает либо нормальный словарь SDK, либо REST-wire JSON с 'fields'. Возвращает плоский dict."""
+    if not doc:
+        return {}
+    if "fields" not in doc or not isinstance(doc["fields"], dict):
+        return doc  # уже распакованный SDK-словарь
+    def _val(node):
+        if "stringValue" in node:   return node["stringValue"]
+        if "integerValue" in node:  return int(node["integerValue"])
+        if "doubleValue" in node:   return float(node["doubleValue"])
+        if "booleanValue" in node:  return bool(node["booleanValue"])
+        if "timestampValue" in node:return node["timestampValue"]
+        if "arrayValue" in node:
+            arr = node["arrayValue"].get("values", []) or []
+            return [_val(v) for v in arr]
+        if "mapValue" in node:
+            f = node["mapValue"].get("fields", {}) or {}
+            return {k: _val(v) for k, v in f.items()}
+        return node
+    return {k: _val(v) for k, v in doc["fields"].items()}
 
+def _norm_district(txt: str | None) -> str | None:
+    if not txt:
+        return None
+    t = txt.strip().lower()
+    mapping = {
+        # Sabail
+        "сабаиль": "Sabail", "сабайыл": "Sabail", "sabail": "Sabail", "sabayil": "Sabail",
+        # Khazar
+        "хазар": "Khazar", "xezer": "Khazar", "xəzər": "Khazar", "khazar": "Khazar",
+        # Nizami (на всякий)
+        "низами": "Nizami", "nizami": "Nizami",
+        # Yasamal
+        "ясамал": "Yasamal", "yasamal": "Yasamal",
+        # Binagadi
+        "бинагади": "Binagadi", "binagadi": "Binagadi", "binəqədi": "Binagadi",
+    }
+    return mapping.get(t, None)
+
+# ---------- Поиск в Firestore под твою схему документов ----------
 def search_venues_firestore(f: dict) -> dict:
-    district = f.get("district")
-    guests   = int(f["guest_count"])
+    # входные фильтры
+    guests = int(f.get("guest_count") or 0)
     price_max = f.get("price_per_guest_max")
-    cuisine  = f.get("cuisine")            # string
+    cuisine = f.get("cuisine")
     req_feats = set(f.get("features") or [])
 
-    q = db.collection("venues")#.where("is_active","==",True)
-    if district:
-        q = q.where("district","==",district)
-    q = q.where("capacity_min","<=",guests).where("capacity_max",">=",guests)
-    if price_max is not None:
-        q = q.where("price_per_person_azn_from","<=",float(price_max))
-    if cuisine:
-        q = q.where("cuisine","array_contains",cuisine)
+    district_in = _norm_district(f.get("district"))
+    q = db.collection("venues")
 
+    # вместимость
+    if guests:
+        q = q.where("capacity_max", ">=", guests).where("capacity_min", "<=", guests)
+
+    # район (только если смогли распознать)
+    if district_in:
+        q = q.where("district", "==", district_in)
+
+    # бюджет/гость: ограничим нижнюю границу по минимальной цене
+    if isinstance(price_max, (int, float)) and price_max > 0:
+        q = q.where("price_per_person_azn_from", "<=", float(price_max))
+
+    # кухня
+    if cuisine:
+        # в твоей схеме cuisine — массив строк => array_contains норм
+        q = q.where("cuisine", "array_contains", cuisine)
+
+    # Выполняем запрос (ограничим, чтобы не упереться в лимиты)
     docs = list(q.limit(50).stream())
+
     items = []
     for d in docs:
-        v = d.to_dict()
+        raw = d.to_dict() or {}
+        v = _unwrap_firestore_rest(raw)  # работает и для SDK-словаря, и для REST-wire
 
-        # объединяем фичи: facilities ∪ services ∪ tags
-        feat_union = set(v.get("facilities",[]) or []) \
-                   | set(v.get("services",[]) or []) \
-                   | set(v.get("tags",[]) or [])
-
+        # features := facilities ∪ services ∪ tags (все массивы строк)
+        feat_union = set(v.get("facilities") or []) | set(v.get("services") or []) | set(v.get("tags") or [])
+        # доп.фильтрация по фичам (второй array-фильтр Firestore не умеет)
         if req_feats and not req_feats.issubset(feat_union):
             continue
 
-        photos = (v.get("media") or {}).get("photos") or []
+        photos = ((v.get("media") or {}).get("photos") or [])
         price_from = v.get("price_per_person_azn_from")
         price_to   = v.get("price_per_person_azn_to")
+        cap_min, cap_max = v.get("capacity_min"), v.get("capacity_max")
 
         items.append({
             "id": v.get("id") or d.id,
             "name": v.get("name"),
             "district": v.get("district"),
-            "capacity": [v.get("capacity_min"), v.get("capacity_max")],
+            "capacity": [cap_min, cap_max],
             "price_per_guest": [price_from, price_to],
             "features": sorted(list(feat_union))[:8],
             "cuisine": v.get("cuisine") or [],
             "cover": photos[0] if photos else None,
-            "base_rental_fee_azn": v.get("base_rental_fee_azn")
+            "base_rental_fee_azn": v.get("base_rental_fee_azn"),
         })
 
-    # сортировка: цена-от ↑, затем max capacity ↓
-    def sort_key(x):
-        pf = x["price_per_guest"][0]
-        return (pf if isinstance(pf,(int,float)) else 1e9, -(x["capacity"][1] or 0))
-    items.sort(key=sort_key)
+    # Сортировка: ближе к guest_count, затем по цене/гостю (from)
+    def score(it):
+        lo, hi = (it.get("capacity") or [0, 10**9])
+        try:
+            center = ((lo or 0) + (hi or 0)) / 2
+        except Exception:
+            center = 0
+        dist = abs(center - (guests or center))
+        pf = (it.get("price_per_guest") or [None, None])[0]
+        pf = pf if isinstance(pf, (int, float)) else 10**9
+        return (dist, pf)
 
+    items.sort(key=score)
     return {"items": items[:7]}
 
 def make_link(filters: dict) -> str:
