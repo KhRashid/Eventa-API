@@ -231,6 +231,28 @@ def format_shortlist(user_text: str, result: dict, link: str, locale: str|None) 
         lines.append(f"{i}) {it.get('name')} — {it.get('district')} — {cap[0]}–{cap[1]} мест — ~{price[0]}–{price[1]} AZN/гость")
     lines.append(f"Смотреть все: {link}")
     return "\n".join(lines)
+    
+@app.get("/selftest")
+def selftest():
+    out = {"has_key": bool(os.getenv("OPENAI_API_KEY")), "openai": None, "firestore": None}
+    # OpenAI ping
+    try:
+        c = get_client()
+        if c is None:
+            out["openai"] = "missing_key"
+        else:
+            # лёгкий вызов без токенов — список моделей
+            list(c.models.list())  # SDK 1.x поддерживает .models.list()
+            out["openai"] = "ok"
+    except Exception as e:
+        out["openai"] = f"error: {repr(e)}"
+    # Firestore ping
+    try:
+        db.collection("venues").limit(1).stream()
+        out["firestore"] = "ok"
+    except Exception as e:
+        out["firestore"] = f"error: {repr(e)}"
+    return jsonify(out), 200
 
 @app.get("/chat")
 def chat_info():
