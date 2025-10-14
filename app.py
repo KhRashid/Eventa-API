@@ -1,4 +1,4 @@
-# rev18
+# rev19
 import os, json
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -8,9 +8,7 @@ from typing import Any, Iterable
 OFFTOPIC_REPLY = "вопрос не относится задачам сервиса и ответить на него не могу"
 
 # рядом с константами
-MODEL_INTENT = "gpt-4o-mini"
-MODEL_FILTERS = "gpt-4o-mini"
-MODEL_FORMAT  = "gpt-4o-mini"
+MODEL_INTENT = MODEL_FILTERS = MODEL_FORMAT  = "gpt-4o-mini"
 
 def safe_openai(call):
     """
@@ -84,7 +82,7 @@ def classify_intent(user_text: str) -> dict:
             response_format={"type": "json_schema", "json_schema": INTENT_SCHEMA},
             timeout=20.0
         )
-        raw = r.output_text  # <-- ключевая замена
+        raw = r.output_text
         try:
             return json.loads(raw)
         except Exception as je:
@@ -133,7 +131,7 @@ def extract_filters(user_text: str) -> dict:
             response_format={"type": "json_schema", "json_schema": FILTER_SCHEMA},
             timeout=20.0
         )
-        raw = r.output_text  # <-- ключевая замена
+        raw = r.output_text
         try:
             return json.loads(raw)
         except Exception as je:
@@ -191,7 +189,7 @@ def search_venues_firestore(f: dict) -> dict:
     cuisine = f.get("cuisine")
     req_feats = set(f.get("features") or [])
 
-    district_in = _norm_district(f.get("district"))
+    district = _norm_district(f.get("district"))
     q = db.collection("venues")
 
     # вместимость
@@ -199,8 +197,8 @@ def search_venues_firestore(f: dict) -> dict:
         q = q.where("capacity_max", ">=", guests).where("capacity_min", "<=", guests)
 
     # район (только если смогли распознать)
-    if district_in:
-        q = q.where("district", "==", district_in)
+    if district:
+        q = q.where("district", "==", district)
 
     # бюджет/гость: ограничим нижнюю границу по минимальной цене
     if isinstance(price_max, (int, float)) and price_max > 0:
