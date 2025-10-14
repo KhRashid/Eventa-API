@@ -207,56 +207,83 @@ def format_shortlist(user_text: str, result: dict, link: str, locale: str|None) 
         "Собери шорт-лист до 7 карточек: Название — район — диапазон мест — ~цена/гость — краткая фича. "
         "В конце выведи одну ссылку link."
     )
-    r = client.responses.create(
-      model="gpt-5",
-      input=[
-        {"role":"system","content":[{"type":"input_text","text": system_scope}]},
-        {"role":"user","content":[{"type":"input_text","text": user_text},
-                                  {"type":"input_text","text": f"[locale={locale or 'auto'}]"}]},
-        {"role":"assistant","content":[{"type":"input_text","text": json.dumps(result, ensure_ascii=False)}]},
-        {"role":"assistant","content":[{"type":"input_text","text": json.dumps({"link":link}, ensure_ascii=False)}]}
-      ]
-    )
-    return "".join(c["content"][0]["text"] for c in r.output if c["type"]=="output_text")
+    def _call():
+        r = client.responses.create(
+          model=MODEL_FORMAT,
+          input=[
+            {"role":"system","content":[{"type":"input_text","text": system_scope}]},
+            {"role":"user","content":[{"type":"input_text","text": user_text},
+                                      {"type":"input_text","text": f"[locale={locale or 'auto'}]"}]},
+            {"role":"assistant","content":[{"type":"input_text","text": json.dumps(result, ensure_ascii=False)}]},
+            {"role":"assistant","content":[{"type":"input_text","text": json.dumps({"link":link}, ensure_ascii=False)}]}
+          ]
+        )
+        return "".join(c["content"][0]["text"] for c in r.output if c["type"]=="output_text")
+    
+    out = safe_openai(_call)
+    if out:
+        return out
+    # резерв без LLM
+    lines = []
+    for i, it in enumerate(result.get("items", [])[:7], 1):
+        cap = it.get("capacity") or [None, None]
+        price = it.get("price_per_guest") or [None, None]
+        lines.append(f"{i}) {it.get('name')} — {it.get('district')} — {cap[0]}–{cap[1]} мест — ~{price[0]}–{price[1]} AZN/гость")
+    lines.append(f"Смотреть все: {link}")
+    return "\n".join(lines)
 
 @app.post("/chat")
 def chat():
-    if get_client() is None:
-    return jsonify({"error": "OPENAI_API_KEY is missing"}), 500
+    try:
+        body = request.get_json(silent=True) or {}
+        
+        if get_client() is None:
+        return jsonify({"error": "OPENAI_API_KEY is missing"}), 500
+        
+        payload = request.get_json(force=True, silent=True) or {}
+        user_text = (payload.get("text") or "").strip()
+        locale = payload.get("locale")
     
-    payload = request.get_json(force=True, silent=True) or {}
-    user_text = (payload.get("text") or "").strip()
-    locale = payload.get("locale")
-
-    if not user_text:
-        return jsonify({"reply": OFFTOPIC_REPLY}), 200
-
-    # 1) оффтоп
-    intent = classify_intent(user_text)
-    if intent.get("intent") == "off_topic" or float(intent.get("confidence",0)) < 0.6:
+        if not user_text:
+            return jsonify({"reply": OFFTOPIC_REPLY}), 200
+    
+        # 1) оффтоп
+        intent = classify_intent(user_text)
+        if intent.get("intent") == "off_topic" or float(intent.get("confidence",0)) < 0.6:
+            return jsonify({
+                "intent": "off_topic",
+                "confidence": float(intent.get("confidence",0)),
+                "reply": OFFTOPIC_REPLY,
+                "shortlist": [],
+                "link": None,
+                "filters_used": None
+            }), 200
+    
+        # 2) фильтры -> поиск -> ссылка -> форматирование
+        filters = extract_filters(user_text)
+        data = search_venues_firestore(filters)
+        link = make_link(filters)
+        reply = format_shortlist(user_text, data, link, locale)
+        
+        '''
         return jsonify({
-            "intent": "off_topic",
+            "intent": "venue_search",
             "confidence": float(intent.get("confidence",0)),
-            "reply": OFFTOPIC_REPLY,
-            "shortlist": [],
-            "link": None,
-            "filters_used": None
+            "filters_used": filters,
+            "shortlist": data.get("items", []),
+            "link": link,
+            "reply": reply
         }), 200
-
-    # 2) фильтры -> поиск -> ссылка -> форматирование
-    filters = extract_filters(user_text)
-    data = search_venues_firestore(filters)
-    link = make_link(filters)
-    reply = format_shortlist(user_text, data, link, locale)
-
-    return jsonify({
-        "intent": "venue_search",
-        "confidence": float(intent.get("confidence",0)),
-        "filters_used": filters,
-        "shortlist": data.get("items", []),
-        "link": link,
-        "reply": reply
-    }), 200
+        '''
+        
+        return jsonify({
+          "intent": intent["intent"], "confidence": intent["confidence"],
+          "filters_used": filters, "shortlist": data["items"],
+          "link": link, "reply": reply
+        }), 200
+    except Exception as e:
+        print("Handler error:", repr(e))
+        return jsonify({"reply": "временная ошибка сервиса, попробуйте позже"}), 200
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
