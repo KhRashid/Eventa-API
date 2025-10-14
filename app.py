@@ -235,54 +235,58 @@ def format_shortlist(user_text: str, result: dict, link: str, locale: str|None) 
 @app.post("/chat")
 def chat():
     try:
-        body = request.get_json(silent=True) or {}
-        
-        if get_client() is None:
-        return jsonify({"error": "OPENAI_API_KEY is missing"}), 500
-        
-        payload = request.get_json(force=True, silent=True) or {}
+        payload = request.get_json(silent=True) or {}
         user_text = (payload.get("text") or "").strip()
         locale = payload.get("locale")
-    
+
         if not user_text:
             return jsonify({"reply": OFFTOPIC_REPLY}), 200
-    
-        # 1) оффтоп
+
+        # Проверка ключа (не падаем на импорте)
+        if get_client() is None:
+            return jsonify({"reply": "OPENAI_API_KEY is missing"}), 200
+
+        # 1) Классификация / оффтоп
         intent = classify_intent(user_text)
-        if intent.get("intent") == "off_topic" or float(intent.get("confidence",0)) < 0.6:
+        conf = float(intent.get("confidence", 0))
+        if intent.get("intent") == "off_topic" or conf < 0.6:
             return jsonify({
                 "intent": "off_topic",
-                "confidence": float(intent.get("confidence",0)),
+                "confidence": conf,
                 "reply": OFFTOPIC_REPLY,
                 "shortlist": [],
                 "link": None,
                 "filters_used": None
             }), 200
-    
-        # 2) фильтры -> поиск -> ссылка -> форматирование
+
+        # 2) Извлечение фильтров → поиск → линк → форматирование
         filters = extract_filters(user_text)
-        data = search_venues_firestore(filters)
+
+        # если search_venues_firestore не готов — временно используем мок:
+        try:
+            data = search_venues_firestore(filters)   # реализуй эту функцию
+        except NameError:
+            data = search_mock(filters)
+
         link = make_link(filters)
-        reply = format_shortlist(user_text, data, link, locale)
-        
-        '''
+
+        # если твоя format_shortlist принимает 3 аргумента — используй так:
+        reply = format_shortlist(user_text, data, link)
+        # если уже сделал поддержку locale, раскомментируй следующую строку и закомментируй строку выше:
+        # reply = format_shortlist(user_text, data, link, locale)
+
         return jsonify({
-            "intent": "venue_search",
-            "confidence": float(intent.get("confidence",0)),
+            "intent": intent.get("intent", "venue_search"),
+            "confidence": conf,
             "filters_used": filters,
             "shortlist": data.get("items", []),
             "link": link,
             "reply": reply
         }), 200
-        '''
-        
-        return jsonify({
-          "intent": intent["intent"], "confidence": intent["confidence"],
-          "filters_used": filters, "shortlist": data["items"],
-          "link": link, "reply": reply
-        }), 200
+
     except Exception as e:
         print("Handler error:", repr(e))
+        # Никогда не отдаём 500 наружу
         return jsonify({"reply": "временная ошибка сервиса, попробуйте позже"}), 200
 
 if __name__ == "__main__":
