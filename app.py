@@ -4,8 +4,22 @@ from openai import OpenAI
 
 OFFTOPIC_REPLY = "вопрос не относится задачам сервиса и ответить на него не могу"
 
-#client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-#app = Flask(__name__)
+# рядом с константами
+MODEL_INTENT = "gpt-4o-mini"
+MODEL_FILTERS = "gpt-4o-mini"
+MODEL_FORMAT  = "gpt-4o-mini"
+
+def safe_openai(call):
+    """
+    call: функция без аргументов, внутри которой client.responses.create(...)
+    Возвращает dict/text либо поднимает исключение в ответ с заглушкой.
+    """
+    try:
+        return call()
+    except Exception as e:
+        # лог в stdout, чтобы видеть в Cloud Run
+        print("OpenAI error:", repr(e))
+        return None
 
 app = Flask(__name__)
 
@@ -51,19 +65,22 @@ def classify_intent(user_text: str) -> dict:
         # безопасная заглушка: считаем оффтопом, чтобы сервис не падал
         return {"intent": "off_topic", "confidence": 1.0}
 
-    r = client.responses.create(
-        model="gpt-5",
-        input=[
-            {"role":"system","content":[{"type":"input_text","text":
-                "Классифицируй, относится ли сообщение к теме организации мероприятий. "
-                "Верни ТОЛЬКО JSON по заданной схеме. "
-                "География/экватор/валюты/медицина/политика/спорт/быт — off_topic."
-            }]},
-            {"role":"user","content":[{"type":"input_text","text": user_text}]}
-        ],
-        response_format={"type":"json_schema","json_schema": INTENT_SCHEMA}
-    )
-    return json.loads(r.output[0].content[0].text)
+    def _call():
+        r = client.responses.create(
+            model=MODEL_INTENT,
+            input=[
+                {"role":"system","content":[{"type":"input_text","text":
+                  "Классифицируй, относится ли сообщение к теме организации мероприятий. "
+                  "Верни ТОЛЬКО JSON по схеме. Всё вне тематики — off_topic."
+                }]},
+                {"role":"user","content":[{"type":"input_text","text": user_text}]}
+            ],
+            response_format={"type":"json_schema","json_schema": INTENT_SCHEMA}
+        )
+        return json.loads(r.output[0].content[0].text)
+
+    out = safe_openai(_call)
+    return out or {"intent":"off_topic","confidence":1.0}
 
 # ---------- Извлечение фильтров ----------
 FILTER_SCHEMA = {
@@ -91,16 +108,21 @@ def extract_filters(user_text: str) -> dict:
         # минимальные дефолты, чтобы код не ломался
         return {"guest_count": 1}
         
-    r = client.responses.create(
-      model="gpt-5",
-      input=[
-        {"role":"system","content":[{"type":"input_text","text":
-          "Извлеки фильтры площадки из текста пользователя. Верни ТОЛЬКО JSON по схеме."}]},
-        {"role":"user","content":[{"type":"input_text","text": user_text}]}
-      ],
-      response_format={"type":"json_schema","json_schema": FILTER_SCHEMA}
-    )
-    return json.loads(r.output[0].content[0].text)
+    def _call():
+        r = client.responses.create(
+          model=MODEL_FILTERS,
+          input=[
+            {"role":"system","content":[{"type":"input_text","text":
+              "Извлеки фильтры площадки из текста пользователя. Верни ТОЛЬКО JSON по схеме."
+            }]},
+            {"role":"user","content":[{"type":"input_text","text": user_text}]}
+          ],
+          response_format={"type":"json_schema","json_schema": FILTER_SCHEMA}
+        )
+        return json.loads(r.output[0].content[0].text)
+
+    out = safe_openai(_call)
+    return out or {"guest_count": 1}
 
 # ---------- Поиск в Firestore под твою схему документов ----------
 from urllib.parse import urlencode
