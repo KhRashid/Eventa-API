@@ -4,8 +4,16 @@ from openai import OpenAI
 
 OFFTOPIC_REPLY = "вопрос не относится задачам сервиса и ответить на него не могу"
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+#client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+#app = Flask(__name__)
+
 app = Flask(__name__)
+
+def get_client():
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        return None
+    return OpenAI(api_key=key)
 
 @app.get("/")
 def health():
@@ -38,6 +46,11 @@ INTENT_SCHEMA = {
 }
 
 def classify_intent(user_text: str) -> dict:
+    client = get_client()
+    if client is None:
+        # безопасная заглушка: считаем оффтопом, чтобы сервис не падал
+        return {"intent": "off_topic", "confidence": 1.0}
+
     r = client.responses.create(
         model="gpt-5",
         input=[
@@ -73,6 +86,11 @@ FILTER_SCHEMA = {
 }
 
 def extract_filters(user_text: str) -> dict:
+    client = get_client()
+    if client is None:
+        # минимальные дефолты, чтобы код не ломался
+        return {"guest_count": 1}
+        
     r = client.responses.create(
       model="gpt-5",
       input=[
@@ -150,6 +168,17 @@ def make_link(filters: dict) -> str:
     return f"{base}?{qs}" if qs else base
 
 def format_shortlist(user_text: str, result: dict, link: str, locale: str|None) -> str:
+    client = get_client()
+    if client is None:
+        # простая текстовая выдача без LLM
+        lines = []
+        for i, it in enumerate(result.get("items", [])[:7], 1):
+            cap = it.get("capacity") or [None, None]
+            price = it.get("price_per_guest") or [None, None]
+            lines.append(f"{i}) {it.get('name')} — {it.get('district')} — {cap[0]}–{cap[1]} мест — ~{price[0]}–{price[1]} AZN/гость")
+        lines.append(f"Смотреть все: {link}")
+        return "\n".join(lines)
+
     system_scope = (
         "Ты — ассистент Evengo для подбора площадок и услуг для мероприятий в Азербайджане. "
         "Отвечай ТОЛЬКО по теме. Если запрос вне тематики — отвечай фиксированной фразой. "
@@ -170,6 +199,9 @@ def format_shortlist(user_text: str, result: dict, link: str, locale: str|None) 
 
 @app.post("/chat")
 def chat():
+    if get_client() is None:
+    return jsonify({"error": "OPENAI_API_KEY is missing"}), 500
+    
     payload = request.get_json(force=True, silent=True) or {}
     user_text = (payload.get("text") or "").strip()
     locale = payload.get("locale")
