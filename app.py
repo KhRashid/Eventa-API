@@ -63,25 +63,34 @@ INTENT_SCHEMA = {
 def classify_intent(user_text: str) -> dict:
     client = get_client()
     if client is None:
-        # безопасная заглушка: считаем оффтопом, чтобы сервис не падал
+        print("OpenAI: no key (classify_intent)")
         return {"intent": "off_topic", "confidence": 1.0}
 
-    def _call():
+    try:
         r = client.responses.create(
             model=MODEL_INTENT,
             input=[
-                {"role":"system","content":[{"type":"input_text","text":
-                  "Классифицируй, относится ли сообщение к теме организации мероприятий. "
-                  "Верни ТОЛЬКО JSON по схеме. Всё вне тематики — off_topic."
+                {"role": "system", "content": [{
+                    "type": "input_text",
+                    "text": (
+                        "Классифицируй, относится ли сообщение к теме организации мероприятий. "
+                        "Верни ТОЛЬКО JSON по схеме (json_schema). Всё вне тематики — off_topic."
+                    )
                 }]},
-                {"role":"user","content":[{"type":"input_text","text": user_text}]}
+                {"role": "user", "content": [{"type": "input_text", "text": user_text}]}
             ],
-            response_format={"type":"json_schema","json_schema": INTENT_SCHEMA}
+            response_format={"type": "json_schema", "json_schema": INTENT_SCHEMA},
+            timeout=20.0
         )
-        return json.loads(r.output[0].content[0].text)
-
-    out = safe_openai(_call)
-    return out or {"intent":"off_topic","confidence":1.0}
+        raw = r.output_text  # <-- ключевая замена
+        try:
+            return json.loads(raw)
+        except Exception as je:
+            print("JSON decode error (classify_intent):", repr(je), "RAW:", raw)
+            return {"intent": "off_topic", "confidence": 1.0}
+    except Exception as e:
+        print("OpenAI error (classify_intent):", repr(e))
+        return {"intent": "off_topic", "confidence": 1.0}
 
 # ---------- Извлечение фильтров ----------
 FILTER_SCHEMA = {
@@ -106,24 +115,31 @@ FILTER_SCHEMA = {
 def extract_filters(user_text: str) -> dict:
     client = get_client()
     if client is None:
-        # минимальные дефолты, чтобы код не ломался
+        print("OpenAI: no key (extract_filters)")
         return {"guest_count": 1}
-        
-    def _call():
-        r = client.responses.create(
-          model=MODEL_FILTERS,
-          input=[
-            {"role":"system","content":[{"type":"input_text","text":
-              "Извлеки фильтры площадки из текста пользователя. Верни ТОЛЬКО JSON по схеме."
-            }]},
-            {"role":"user","content":[{"type":"input_text","text": user_text}]}
-          ],
-          response_format={"type":"json_schema","json_schema": FILTER_SCHEMA}
-        )
-        return json.loads(r.output[0].content[0].text)
 
-    out = safe_openai(_call)
-    return out or {"guest_count": 1}
+    try:
+        r = client.responses.create(
+            model=MODEL_FILTERS,
+            input=[
+                {"role": "system", "content": [{
+                    "type": "input_text",
+                    "text": "Извлеки фильтры площадки из текста пользователя. Верни ТОЛЬКО JSON по схеме."
+                }]},
+                {"role": "user", "content": [{"type": "input_text", "text": user_text}]}
+            ],
+            response_format={"type": "json_schema", "json_schema": FILTER_SCHEMA},
+            timeout=20.0
+        )
+        raw = r.output_text  # <-- ключевая замена
+        try:
+            return json.loads(raw)
+        except Exception as je:
+            print("JSON decode error (extract_filters):", repr(je), "RAW:", raw)
+            return {"guest_count": 1}
+    except Exception as e:
+        print("OpenAI error (extract_filters):", repr(e))
+        return {"guest_count": 1}
 
 # ---------- Поиск в Firestore под твою схему документов ----------
 from urllib.parse import urlencode
@@ -135,7 +151,7 @@ def search_venues_firestore(f: dict) -> dict:
     cuisine  = f.get("cuisine")            # string
     req_feats = set(f.get("features") or [])
 
-    q = db.collection("venues").where("is_active","==",True)
+    q = db.collection("venues")#.where("is_active","==",True)
     if district:
         q = q.where("district","==",district)
     q = q.where("capacity_min","<=",guests).where("capacity_max",">=",guests)
@@ -190,41 +206,38 @@ def make_link(filters: dict) -> str:
         qs += ("&" if qs else "") + "features=" + ",".join(filters["features"])
     return f"{base}?{qs}" if qs else base
 
-def format_shortlist(user_text: str, result: dict, link: str, locale: str|None) -> str:
+def format_shortlist(user_text: str, result: dict, link: str, locale: str | None = None) -> str:
     client = get_client()
     if client is None:
-        # простая текстовая выдача без LLM
-        lines = []
-        for i, it in enumerate(result.get("items", [])[:7], 1):
-            cap = it.get("capacity") or [None, None]
-            price = it.get("price_per_guest") or [None, None]
-            lines.append(f"{i}) {it.get('name')} — {it.get('district')} — {cap[0]}–{cap[1]} мест — ~{price[0]}–{price[1]} AZN/гость")
-        lines.append(f"Смотреть все: {link}")
-        return "\n".join(lines)
+        return _fallback_format(result, link)
 
     system_scope = (
         "Ты — ассистент Evengo для подбора площадок и услуг для мероприятий в Азербайджане. "
         "Отвечай ТОЛЬКО по теме. Если запрос вне тематики — отвечай фиксированной фразой. "
-        "Собери шорт-лист до 7 карточек: Название — район — диапазон мест — ~цена/гость — краткая фича. "
+        "Собери шорт-лист до 7 карточек: «Название — район — X–Y мест — ~цена/гость — краткая фича». "
         "В конце выведи одну ссылку link."
     )
-    def _call():
+
+    try:
         r = client.responses.create(
-          model=MODEL_FORMAT,
-          input=[
-            {"role":"system","content":[{"type":"input_text","text": system_scope}]},
-            {"role":"user","content":[{"type":"input_text","text": user_text},
-                                      {"type":"input_text","text": f"[locale={locale or 'auto'}]"}]},
-            {"role":"assistant","content":[{"type":"input_text","text": json.dumps(result, ensure_ascii=False)}]},
-            {"role":"assistant","content":[{"type":"input_text","text": json.dumps({"link":link}, ensure_ascii=False)}]}
-          ]
+            model=MODEL_FORMAT,
+            input=[
+                {"role": "system", "content": [{"type": "input_text", "text": system_scope}]},
+                {"role": "user", "content": [
+                    {"type": "input_text", "text": user_text},
+                    {"type": "input_text", "text": f"[locale={locale or 'auto'}]"}
+                ]},
+                {"role": "assistant", "content": [{"type": "input_text", "text": json.dumps(result, ensure_ascii=False)}]},
+                {"role": "assistant", "content": [{"type": "input_text", "text": json.dumps({"link": link}, ensure_ascii=False)}]}
+            ],
+            timeout=20.0
         )
-        return "".join(c["content"][0]["text"] for c in r.output if c["type"]=="output_text")
-    
-    out = safe_openai(_call)
-    if out:
-        return out
-    # резерв без LLM
+        return r.output_text or _fallback_format(result, link)  # <-- ключевая замена
+    except Exception as e:
+        print("OpenAI error (format_shortlist):", repr(e))
+        return _fallback_format(result, link)
+
+def _fallback_format(result: dict, link: str) -> str:
     lines = []
     for i, it in enumerate(result.get("items", [])[:7], 1):
         cap = it.get("capacity") or [None, None]
@@ -232,6 +245,7 @@ def format_shortlist(user_text: str, result: dict, link: str, locale: str|None) 
         lines.append(f"{i}) {it.get('name')} — {it.get('district')} — {cap[0]}–{cap[1]} мест — ~{price[0]}–{price[1]} AZN/гость")
     lines.append(f"Смотреть все: {link}")
     return "\n".join(lines)
+
     
 @app.get("/selftest")
 def selftest():
@@ -304,9 +318,9 @@ def chat():
         link = make_link(filters)
 
         # если твоя format_shortlist принимает 3 аргумента — используй так:
-        reply = format_shortlist(user_text, data, link)
+        #reply = format_shortlist(user_text, data, link)
         # если уже сделал поддержку locale, раскомментируй следующую строку и закомментируй строку выше:
-        # reply = format_shortlist(user_text, data, link, locale)
+        reply = format_shortlist(user_text, data, link, locale)
 
         return jsonify({
             "intent": intent.get("intent", "venue_search"),
