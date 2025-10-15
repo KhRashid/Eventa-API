@@ -1,4 +1,4 @@
-# rev24
+# rev25
 # app.py
 import os, json, re
 from urllib.parse import urlencode
@@ -201,8 +201,11 @@ def extract_filters(user_text: str) -> dict:
         llm = {}
 
     out = {}
-    out["guest_count"] = int(llm.get("guest_count") or fb.get("guest_count") or 1)
-
+    #out["guest_count"] = int(llm.get("guest_count") or fb.get("guest_count") or 1)
+    gc = llm.get("guest_count") or fb.get("guest_count")
+    if gc is not None:
+        out["guest_count"] = int(gc)
+    
     if llm.get("price_per_guest_max") is not None:
         out["price_per_guest_max"] = float(llm["price_per_guest_max"])
     elif "price_per_guest_max" in fb:
@@ -251,6 +254,13 @@ def search_venues_firestore(f: dict) -> dict:
     # единственный серверный неравенственный фильтр — чтобы НЕ требовались композитные индексы
     if guests:
         q = q.where("capacity_min", "<=", guests)
+        q = q.where("capacity_max", ">=", guests)
+
+    if district:
+        q = q.where("district", "==", district)
+
+    if cuisine:
+        q = q.where("cuisine", "array_contains", cuisine)
 
     try:
         docs = list(q.limit(200).stream())
