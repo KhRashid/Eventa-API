@@ -1,4 +1,4 @@
-# rev20
+# rev21
 import os, json
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -225,14 +225,15 @@ def _norm_district(txt: str | None) -> str | None:
     return mapping.get(t, None)
 
 # ---------- Поиск в Firestore под твою схему документов ----------
+'''
 def search_venues_firestore(f: dict) -> dict:
     # входные фильтры
     guests = int(f.get("guest_count") or 0)
     price_max = f.get("price_per_guest_max")
     cuisine = f.get("cuisine")
     req_feats = set(f.get("features") or [])
-
     district = _norm_district(f.get("district"))
+    
     q = db.collection("venues")
 
     # вместимость
@@ -253,7 +254,7 @@ def search_venues_firestore(f: dict) -> dict:
         q = q.where("cuisine", "array_contains", cuisine)
 
     # Выполняем запрос (ограничим, чтобы не упереться в лимиты)
-    docs = list(q.limit(50).stream())
+    docs = list(q.limit(100).stream())
 
     items = []
     for d in docs:
@@ -282,6 +283,75 @@ def search_venues_firestore(f: dict) -> dict:
             "cover": photos[0] if photos else None,
             "base_rental_fee_azn": v.get("base_rental_fee_azn"),
         })
+    '''
+def search_venues_firestore(f: dict) -> dict:
+    guests = int(f.get("guest_count") or 0)
+    price_max = f.get("price_per_guest_max")
+    cuisine = f.get("cuisine")
+    req_feats = set((f.get("features") or []))
+    district = _norm_district(f.get("district"))
+
+    q = db.collection("venues")
+
+    # единственный range-фильтр в запросе
+    if guests:
+        # capacity_min <= guests
+        q = q.where("capacity_min", "<=", guests).order_by("capacity_min", direction=firestore.Query.DESCENDING)
+
+    if district:
+        q = q.where("district", "==", district)
+
+    if cuisine:
+        q = q.where("cuisine", "array_contains", cuisine)
+
+    # ВАЖНО: больше никаких range-фильтров в запросе!
+    docs = list(q.limit(100).stream())
+
+    items = []
+    for d in docs:
+        raw = d.to_dict() or {}
+        v = _unwrap_firestore_rest(raw)
+
+        # client-side фильтр по capacity_max
+        cap_min, cap_max = v.get("capacity_min"), v.get("capacity_max")
+        if guests and (cap_max is None or cap_max < guests):
+            continue
+
+        # client-side фильтр по цене (from)
+        if isinstance(price_max, (int, float)) and v.get("price_per_person_azn_from") is not None:
+            if float(v["price_per_person_azn_from"]) > float(price_max):
+                continue
+
+        # client-side фильтр по features (facilities ∪ services ∪ tags)
+        feat_union = set(v.get("facilities") or []) | set(v.get("services") or []) | set(v.get("tags") or [])
+        if req_feats and not req_feats.issubset(feat_union):
+            continue
+
+        photos = ((v.get("media") or {}).get("photos") or [])
+        items.append({
+            "id": v.get("id") or d.id,
+            "name": v.get("name"),
+            "district": v.get("district"),
+            "capacity": [cap_min, cap_max],
+            "price_per_guest": [v.get("price_per_person_azn_from"), v.get("price_per_person_azn_to")],
+            "features": sorted(list(feat_union))[:8],
+            "cuisine": v.get("cuisine") or [],
+            "cover": photos[0] if photos else None,
+            "base_rental_fee_azn": v.get("base_rental_fee_azn"),
+        })
+
+    # сортируем: ближе к нужной вместимости, затем по цене от
+    def score(it):
+        lo, hi = (it.get("capacity") or [0, 10**9])
+        center = ((lo or 0) + (hi or 0)) / 2
+        dist = abs(center - (guests or center))
+        pf = (it.get("price_per_guest") or [None, None])[0]
+        pf = pf if isinstance(pf, (int, float)) else 10**9
+        return (dist, pf)
+
+    items.sort(key=score)
+    return {"items": items[:7]}
+
 
     # Сортировка: ближе к guest_count, затем по цене/гостю (from)
     def score(it):
