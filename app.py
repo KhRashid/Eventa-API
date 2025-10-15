@@ -1,4 +1,4 @@
-# rev21
+# rev22
 import os, json
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -49,8 +49,70 @@ VENUE_KEYWORDS = [
     "евент", "мероприят", "свадьб", "день рождения", "юбиле", "аренда",
     "зал", "площадк", "банкет", "торжеств", "кейтеринг", "сабай", "хазар",
     "xezer", "khazar", "yasamal", "binagadi", "nizami", "sabail", "sabayil",
-    "бакин", "бак"
+    "бакин", "бак", "azn", "манат", "маната", "manat", "локац", "зал", "банкета"
 ]
+
+# ключевые слова → feature в базе
+FEATURE_KWS = {
+    "озеро": "Lakeside",
+    "у озера": "Lakeside",
+    "озер": "Lakeside",
+    "детская зона": "Kids zone",
+    "детская": "Kids zone",
+    "дети": "Kids zone",
+    "парковк": "Parking",           # если такое поле используешь в tags/services
+    "сцена": "Stage",               # при необходимости
+}
+
+# возможные кухни (пример; расширь под свою базу)
+CUISINE_KWS = {
+    "азер": "Azeri",
+    "bbq": "BBQ",
+    "барбекю": "BBQ",
+    "европ": "European",
+}
+
+# ----------- Fallback-парсер (регулярки) ------------
+def parse_fallback_filters(text: str) -> dict:
+    t = (text or "").lower()
+    out = {}
+
+    # гости: "80 гост" / "на 80" / "до 80"
+    m = re.search(r'(\d{1,4})\s*(гост|гостей|гостя|мест)', t)
+    if m:
+        out["guest_count"] = int(m.group(1))
+
+    # бюджет/гость: "до 50 azn" / "50 азн" / "50 манат"
+    m = re.search(r'до\s*(\d{1,5})\s*(azn|манат|manat)', t)
+    if not m:
+        m = re.search(r'(\d{1,5})\s*(azn|манат|manat)', t)
+    if m:
+        out["price_per_guest_max"] = float(m.group(1))
+
+    # район (прогоняем через _norm_district)
+    for cand in ["хазар", "xezer", "xəzər", "khazar", "сабаиль", "sabail", "sabayil",
+                 "ясамал", "yasamal", "низами", "nizami", "бинагади", "binagadi", "binəqədi"]:
+        if cand in t:
+            norm = _norm_district(cand)
+            if norm:
+                out["district"] = norm
+                break
+
+    # кухня
+    for kw, val in CUISINE_KWS.items():
+        if kw in t:
+            out["cuisine"] = val
+            break
+
+    # фичи
+    feats = set()
+    for kw, feat in FEATURE_KWS.items():
+        if kw in t:
+            feats.add(feat)
+    if feats:
+        out["features"] = sorted(list(feats))
+
+    return out
 
 def looks_like_venue_request(text: str, filters: dict) -> bool:
     """Правило: если извлечены смысловые фильтры ИЛИ текст содержит «сигналы» запросов по площадке — считаем venue_search."""
@@ -155,6 +217,7 @@ FILTER_SCHEMA = {
   "strict": True
 }
 
+'''
 def extract_filters(user_text: str) -> dict:
     client = get_client()
     if client is None:
@@ -183,6 +246,66 @@ def extract_filters(user_text: str) -> dict:
     except Exception as e:
         print("OpenAI error (extract_filters):", repr(e))
         return {"guest_count": 1}
+'''
+def extract_filters(user_text: str) -> dict:
+    # 0) fallback по регуляркам (быстрый и бесплатный план)
+    fb = parse_fallback_filters(user_text)
+
+    client = get_client()
+    if client is None:
+        # только fallback
+        return {"guest_count": fb.get("guest_count", 1),
+                **{k: v for k, v in fb.items() if k != "guest_count"}}
+
+    # 1) LLM с чётким промптом и примерами
+    system_msg = (
+        "Ты извлекаешь фильтры для подбора площадки событий. "
+        "Верни ТОЛЬКО JSON по схеме. Если чего-то нет — не выдумывай."
+        "\nПримеры:\n"
+        "Вход: 'Хазар, 80 гостей, до 50 AZN, озеро и детская зона'\n"
+        "Выход: {\"guest_count\":80, \"district\":\"Khazar\", \"price_per_guest_max\":50, "
+        "\"features\":[\"Lakeside\",\"Kids zone\"]}\n"
+        "Вход: 'Сабаиль, банкет на 120, BBQ'\n"
+        "Выход: {\"guest_count\":120, \"district\":\"Sabail\", \"cuisine\":\"BBQ\"}"
+    )
+
+    try:
+        r = client.responses.create(
+            model=MODEL_FILTERS,
+            temperature=0,
+            input=[
+                {"role":"system","content":[{"type":"input_text","text": system_msg}]},
+                {"role":"user","content":[{"type":"input_text","text": user_text}]}
+            ],
+            response_format={"type":"json_schema","json_schema": FILTER_SCHEMA},
+            max_output_tokens=300,
+            timeout=20.0
+        )
+        raw = r.output_text
+        llm = json.loads(raw) if raw else {}
+    except Exception as e:
+        print("OpenAI error (extract_filters):", repr(e))
+        llm = {}
+
+    # 2) мерджим: приоритет LLM, где поля валидны; иначе — fallback
+    out = {}
+    out["guest_count"] = int(llm.get("guest_count") or fb.get("guest_count") or 1)
+
+    if llm.get("price_per_guest_max") is not None:
+        out["price_per_guest_max"] = float(llm["price_per_guest_max"])
+    elif "price_per_guest_max" in fb:
+        out["price_per_guest_max"] = float(fb["price_per_guest_max"])
+
+    district = llm.get("district") or fb.get("district")
+    out["district"] = _norm_district(district) if district else None
+
+    out["cuisine"] = llm.get("cuisine") or fb.get("cuisine")
+    feats = set(llm.get("features") or []) | set(fb.get("features") or [])
+    if feats:
+        out["features"] = sorted(list(feats))
+
+    # уберём None-поля, чтобы не засорять ссылку
+    return {k: v for k, v in out.items() if v not in (None, [], "")}
 
 # ---------- helpers: unwrap Firestore REST doc + district normalization ----------
 def _unwrap_firestore_rest(doc: dict) -> dict:
