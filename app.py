@@ -1,4 +1,4 @@
-# rev19
+# rev20
 import os, json
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -102,6 +102,7 @@ def classify_intent(user_text: str) -> dict:
     try:
         r = client.responses.create(
             model=MODEL_INTENT,
+            temperature=0,
             input=[
                 {"role": "system", "content": [{
                     "type": "input_text",
@@ -113,23 +114,13 @@ def classify_intent(user_text: str) -> dict:
                         "Любые вопросы, не связанные с мероприятиями, = off_topic."
                     )
                 }]},
-                # пара коротких примеров закрепляют паттерн
+                # few-shot фиксация паттерна
                 {"role": "user", "content": [{"type": "input_text", "text": "Сабаиль, 100 гостей, до 50 AZN, сцена и парковка"}]},
                 {"role": "assistant", "content": [{"type": "input_text", "text": json.dumps({"intent":"venue_search","confidence":0.95})}]},
                 {"role": "user", "content": [{"type": "input_text", "text": "сколько длина экватора?"}]},
                 {"role": "assistant", "content": [{"type": "input_text", "text": json.dumps({"intent":"off_topic","confidence":0.99})}]},
                 # реальный вход
                 {"role": "user", "content": [{"type": "input_text", "text": user_text}]}
-                '''
-                {"role": "system", "content": [{
-                    "type": "input_text",
-                    "text": (
-                        "Классифицируй, относится ли сообщение к теме организации мероприятий. "
-                        "Верни ТОЛЬКО JSON по схеме (json_schema). Всё вне тематики — off_topic."
-                    )
-                }]},
-                {"role": "user", "content": [{"type": "input_text", "text": user_text}]}
-                '''
             ],
             response_format={"type": "json_schema", "json_schema": INTENT_SCHEMA},
             timeout=20.0
