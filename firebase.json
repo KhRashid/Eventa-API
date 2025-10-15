@@ -1,9 +1,14 @@
 {
   "hosting": {
+    "public": "public",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [
+      { "source": "!/@(assets|img|css|js)/**", "destination": "/index.html" }
+    ],
+    "headers": [
       {
-        "source": "/chat",
-        "run": { "serviceId": "evengo-api", "region": "europe-west1" }
+        "source": "**/*.@(js|css)",
+        "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400" }]
       }
     ]
   }
