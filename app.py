@@ -41,6 +41,39 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app()   # в Cloud Run возьмет default credentials
 db = firestore.client()
 
+# ----- Добавь эту функцию (выше /chat): ------
+import re
+
+VENUE_KEYWORDS = [
+    "гость", "гостей", "мест", "гостей", "банкета", "сцена", "парковк",
+    "евент", "мероприят", "свадьб", "день рождения", "юбиле", "аренда",
+    "зал", "площадк", "банкет", "торжеств", "кейтеринг", "сабай", "хазар",
+    "xezer", "khazar", "yasamal", "binagadi", "nizami", "sabail", "sabayil",
+    "бакин", "бак"
+]
+
+def looks_like_venue_request(text: str, filters: dict) -> bool:
+    """Правило: если извлечены смысловые фильтры ИЛИ текст содержит «сигналы» запросов по площадке — считаем venue_search."""
+    t = text.lower()
+    # сильные фильтры
+    if (filters.get("guest_count") or filters.get("district") or
+        filters.get("price_per_guest_max") or filters.get("cuisine") or
+        (filters.get("features") and len(filters["features"]) > 0)):
+        return True
+
+    # числа как «80 гостей», «до 50 azn»
+    if re.search(r"\b\d+\s*(гост|мест)", t):         # 80 гостей / 120 мест
+        return True
+    if re.search(r"\b\d+\s*azn\b", t):               # 50 azn
+        return True
+
+    # ключевые слова
+    for kw in VENUE_KEYWORDS:
+        if kw in t:
+            return True
+
+    return False
+
 # ---------- Классификатор намерений ----------
 INTENT_SCHEMA = {
   "name": "EventIntent",
@@ -73,11 +106,30 @@ def classify_intent(user_text: str) -> dict:
                 {"role": "system", "content": [{
                     "type": "input_text",
                     "text": (
+                        "Ты классификатор намерений сервиса подбора площадок для мероприятий.\n"
+                        "Возврати ТОЛЬКО JSON по схеме. Если в запросе есть признаки подбора площадки "
+                        "(район/кол-во гостей/бюджет/кухня/особенности/дата), класс = venue_search.\n"
+                        "Если спрашивают о правилах, оплате или логистике — соответствующие классы.\n"
+                        "Любые вопросы, не связанные с мероприятиями, = off_topic."
+                    )
+                }]},
+                # пара коротких примеров закрепляют паттерн
+                {"role": "user", "content": [{"type": "input_text", "text": "Сабаиль, 100 гостей, до 50 AZN, сцена и парковка"}]},
+                {"role": "assistant", "content": [{"type": "input_text", "text": json.dumps({"intent":"venue_search","confidence":0.95})}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "сколько длина экватора?"}]},
+                {"role": "assistant", "content": [{"type": "input_text", "text": json.dumps({"intent":"off_topic","confidence":0.99})}]},
+                # реальный вход
+                {"role": "user", "content": [{"type": "input_text", "text": user_text}]}
+                '''
+                {"role": "system", "content": [{
+                    "type": "input_text",
+                    "text": (
                         "Классифицируй, относится ли сообщение к теме организации мероприятий. "
                         "Верни ТОЛЬКО JSON по схеме (json_schema). Всё вне тематики — off_topic."
                     )
                 }]},
                 {"role": "user", "content": [{"type": "input_text", "text": user_text}]}
+                '''
             ],
             response_format={"type": "json_schema", "json_schema": INTENT_SCHEMA},
             timeout=20.0
@@ -351,9 +403,46 @@ def chat():
         if get_client() is None:
             return jsonify({"reply": "OPENAI_API_KEY is missing"}), 200
 
+        # 0) Сначала пробуем выжать фильтры / Извлечение фильтров → поиск → линк → форматирование
+        filters = extract_filters(user_text)
+
+        # 0.1) Если это очень похоже на запрос площадки — НЕ спрашиваем LLM-классификатор,
+        # идём сразу в поиск
+        if looks_like_venue_request(user_text, filters):
+            data = search_venues_firestore(filters)
+            link = make_link(filters)
+            reply = format_shortlist(user_text, data, link, locale)
+            return jsonify({
+                "intent": "venue_search",
+                "confidence": 0.9,     # мы уверены правилами
+                "filters_used": filters,
+                "shortlist": data.get("items", []),
+                "link": link,
+                "reply": reply
+            }), 200
+        
+        # 1) Иначе — просим LLM классифицировать
+        intent = classify_intent(user_text)
+        conf = float(intent.get("confidence", 0))
+
+        if intent.get("intent") == "venue_search" and conf >= 0.5:
+            data = search_venues_firestore(filters)
+            link = make_link(filters)
+            reply = format_shortlist(user_text, data, link, locale)
+            return jsonify({
+                "intent": "venue_search",
+                "confidence": conf,
+                "filters_used": filters,
+                "shortlist": data.get("items", []),
+                "link": link,
+                "reply": reply
+            }), 200
+            
+        '''    
         # 1) Классификация / оффтоп
         intent = classify_intent(user_text)
         conf = float(intent.get("confidence", 0))
+        
         if intent.get("intent") == "off_topic" or conf < 0.6:
             return jsonify({
                 "intent": "off_topic",
@@ -363,9 +452,9 @@ def chat():
                 "link": None,
                 "filters_used": None
             }), 200
-
-        # 2) Извлечение фильтров → поиск → линк → форматирование
-        filters = extract_filters(user_text)
+            
+        ## 2) Извлечение фильтров → поиск → линк → форматирование
+        #filters = extract_filters(user_text)
 
         # если search_venues_firestore не готов — временно используем мок:
         try:
@@ -387,6 +476,17 @@ def chat():
             "shortlist": data.get("items", []),
             "link": link,
             "reply": reply
+        }), 200
+        '''
+        
+        # 2) Всё остальное считаем оффтопом
+        return jsonify({
+            "intent": "off_topic",
+            "confidence": conf,
+            "reply": OFFTOPIC_REPLY,
+            "shortlist": [],
+            "link": None,
+            "filters_used": None
         }), 200
 
     except Exception as e:
