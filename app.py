@@ -1,9 +1,10 @@
-# rev22
+# rev23
 import os, json
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from urllib.parse import urlencode
 from typing import Any, Iterable
+from google.cloud.firestore_v1 import Query
 
 OFFTOPIC_REPLY = "вопрос не относится задачам сервиса и ответить на него не могу"
 
@@ -419,7 +420,8 @@ def search_venues_firestore(f: dict) -> dict:
     # единственный range-фильтр в запросе
     if guests:
         # capacity_min <= guests
-        q = q.where("capacity_min", "<=", guests).order_by("capacity_min", direction=firestore.Query.DESCENDING)
+        #q = q.where("capacity_min", "<=", guests).order_by("capacity_min", direction=firestore.Query.DESCENDING)
+        q = q.where("capacity_min", "<=", guests)
 
     if district:
         q = q.where("district", "==", district)
