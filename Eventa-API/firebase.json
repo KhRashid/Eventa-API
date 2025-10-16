@@ -1,0 +1,10 @@
+{
+  "hosting": {
+    "rewrites": [
+      {
+        "source": "/chat",
+        "run": { "serviceId": "evengo-api", "region": "europe-west1" }
+      }
+    ]
+  }
+}
