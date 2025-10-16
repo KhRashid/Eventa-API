@@ -1,0 +1,5 @@
+Eventa-API/
+.git
+*.zip
+__pycache__/
+*.pyc
