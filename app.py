@@ -1,4 +1,4 @@
-# rev27
+# rev28
 # app.py
 import os, json, re
 from urllib.parse import urlencode
@@ -459,14 +459,17 @@ def chat():
         try:
             if looks_like_venue_request(user_text, filters):
                 data = search_venues_firestore(filters)
-            venue_ids = [it.get('id') for it in data.get('items', []) if it.get('id')]
-            link = create_shortlist_link(venue_ids)
-                link = link or create_shortlist_link([it.get("id") for it in data.get("items", []) if it.get("id")])
+                venue_ids = [it.get('id') for it in data.get('items', []) if it.get('id')]
+                link = create_shortlist_link(venue_ids)
+                #link = link or create_shortlist_link([it.get("id") for it in data.get("items", []) if it.get("id")])
                 reply = format_shortlist(user_text, data, link, locale)
                 return jsonify({
-                    "intent":"venue_search","confidence":0.9,
-                    "filters_used":filters,"shortlist":data.get("items",[]),
-                    "link":link,"reply":reply
+                    "intent":"venue_search",
+                    "confidence":0.9,
+                    "filters_used":filters,
+                    "shortlist":data.get("items",[]),
+                    "link":link,
+                    "reply":reply
                 }), 200
         except Exception as e:
             print("[chat][S2 quick] error:", repr(e))
