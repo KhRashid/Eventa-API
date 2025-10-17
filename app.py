@@ -3,12 +3,15 @@
 import os, json, re
 from urllib.parse import urlencode
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from openai import OpenAI
 
 OFFTOPIC_REPLY = "вопрос не относится задачам сервиса и ответить на него не могу"
 MODEL_INTENT = MODEL_FILTERS = MODEL_FORMAT = "gpt-4o-mini"
 
 app = Flask(__name__)
+# сразу после app = Flask(__name__)
+CORS(app, resources={r"/shortlists/*": {"origins": [os.getenv("CATALOGUE_BASE_URL", "https://evengo.space"), "https://www.evengo.space"]}})
 
 # ---------- OpenAI ----------
 def get_client():
@@ -433,7 +436,31 @@ def chat_info():
         200,
         {"Content-Type": "text/html; charset=utf-8"},
     )
+    
+# ----------- Dynamic Catalogue -----------
+@app.get("/shortlists/<slug>")
+def get_shortlist(slug):
+    token = request.args.get("token")
+    _db = get_db()
+    if _db is None:
+        return jsonify({"error":"db_unavailable"}), 503
 
+    doc = _db.collection("shortlists").document(slug).get()
+    if not doc.exists:
+        return jsonify({"error":"not_found"}), 404
+
+    data = doc.to_dict() or {}
+    if token and token != data.get("token"):
+        return jsonify({"error":"forbidden"}), 403
+
+    # только нужные поля наружу
+    return jsonify({
+        "slug": slug,
+        "created_at": data.get("created_at"),
+        "note": data.get("note"),
+        "items": data.get("items", []),   # массив площадок
+    }), 200
+    
 # ---------- основной обработчик ----------
 @app.post("/chat")
 def chat():
